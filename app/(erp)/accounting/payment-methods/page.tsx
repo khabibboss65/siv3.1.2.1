@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { formatCurrency } from '@/lib/format';
 import { toast } from '@/hooks/use-toast';
-import { Plus, CreditCard as Edit, Trash2, GripVertical, Banknote, Building2, CreditCard, Smartphone, FileText, MoveHorizontal as MoreHorizontal, ChevronUp, ChevronDown, X } from 'lucide-react';
+import { Plus, Pencil, Trash2, Banknote, Building2, CreditCard, Smartphone, FileText, MoveHorizontal as MoreHorizontal, ChevronUp, ChevronDown, X } from 'lucide-react';
 
 interface PaymentMethod {
   id: string;
@@ -155,7 +155,7 @@ export default function PaymentMethodsPage() {
                       onClick={() => { setEditingMethod(method); setShowModal(true); }}
                       className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-blue-50 text-muted-foreground hover:text-blue-600 transition"
                     >
-                      <Edit className="w-3.5 h-3.5" />
+                      <Pencil className="w-3.5 h-3.5" />
                     </button>
                     <button
                       onClick={() => setDeletingMethod(method)}
