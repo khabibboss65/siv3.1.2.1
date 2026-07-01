@@ -17,6 +17,14 @@ interface PaymentMethod {
   sort_order: number;
   icon_name?: string;
   description?: string;
+  accounts?: { id: string; code: string; name: string };
+}
+
+interface Account {
+  id: string;
+  code: string;
+  name: string;
+  account_type: string;
 }
 
 const iconMap: Record<string, React.ElementType> = {
@@ -39,7 +47,7 @@ export default function PaymentMethodsPage() {
 
   async function loadMethods() {
     setLoading(true);
-    const { data } = await supabase.from('payment_methods').select('*').order('sort_order');
+    const { data } = await supabase.from('payment_methods').select('*, accounts(id, code, name)').order('sort_order');
     setMethods(data || []);
     setLoading(false);
   }
@@ -142,7 +150,11 @@ export default function PaymentMethodsPage() {
                   </div>
                   <div className="flex-1">
                     <p className="text-sm font-semibold text-foreground">{method.name}</p>
-                    <p className="text-xs text-muted-foreground">{method.code} {method.description && `- ${method.description}`}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {method.code}
+                      {method.accounts && ` → ${method.accounts.code} ${method.accounts.name}`}
+                      {method.description && ` - ${method.description}`}
+                    </p>
                   </div>
                   <div className="flex items-center gap-1">
                     <button
@@ -238,9 +250,17 @@ function PaymentMethodModal({ method, onClose, onSaved }: { method: PaymentMetho
     is_bank: method?.is_bank || false,
     description: method?.description || '',
     icon_name: method?.icon_name || 'more-horizontal',
+    account_id: method?.account_id || '',
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [accounts, setAccounts] = useState<Account[]>([]);
+
+  useEffect(() => {
+    supabase.from('accounts').select('id, code, name, account_type').eq('account_type', 'asset').order('code').then(({ data }) => {
+      setAccounts(data || []);
+    });
+  }, []);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -259,6 +279,7 @@ function PaymentMethodModal({ method, onClose, onSaved }: { method: PaymentMetho
       is_bank: form.is_bank,
       description: form.description || null,
       icon_name: form.icon_name,
+      account_id: form.account_id || null,
       sort_order: method?.sort_order || 100,
     };
 
@@ -355,6 +376,21 @@ function PaymentMethodModal({ method, onClose, onSaved }: { method: PaymentMetho
               />
               <span className="text-sm">Is Bank</span>
             </label>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium mb-1">Linked Account</label>
+            <select
+              value={form.account_id}
+              onChange={e => setForm({ ...form, account_id: e.target.value })}
+              className="w-full border border-border rounded-lg px-3 py-2 text-sm focus:outline-none"
+            >
+              <option value="">-- Select Account --</option>
+              {accounts.map(acc => (
+                <option key={acc.id} value={acc.id}>{acc.code} - {acc.name}</option>
+              ))}
+            </select>
+            <p className="text-xs text-muted-foreground mt-1">Payments made with this method will be recorded to this account</p>
           </div>
 
           <div className="flex items-center justify-end gap-3 pt-2">

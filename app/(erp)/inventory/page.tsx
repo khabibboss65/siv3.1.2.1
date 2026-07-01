@@ -32,6 +32,7 @@ interface ProductWithStock extends Omit<Product, 'category' | 'brand'> {
   brand?: { name: string };
   product_colors?: { id: string; name: string; hex_code: string }[];
   product_sizes?: { id: string; name: string }[];
+  stock_by_warehouse?: { warehouse_id: string; quantity: number }[];
 }
 
 export default function InventoryPage() {
@@ -83,6 +84,10 @@ export default function InventoryPage() {
     const prods = (prodRes.data || []).map((p: any) => ({
       ...p,
       total_stock: stockMap[p.id] || 0,
+      stock_by_warehouse: Object.entries(byWarehouse[p.id] || {}).map(([warehouse_id, quantity]) => ({
+        warehouse_id,
+        quantity,
+      })),
     }));
 
     setProducts(prods);
@@ -438,14 +443,23 @@ function ProductModal({ categories, brands, warehouses, product, onClose, onSave
   }, [product?.id]);
 
   async function loadProductVariants(productId: string) {
-    const [colorRes, sizeRes, unitRes] = await Promise.all([
+    const [colorRes, sizeRes, unitRes, invRes] = await Promise.all([
       supabase.from('product_colors').select('*').eq('product_id', productId).order('sort_order'),
       supabase.from('product_sizes').select('*').eq('product_id', productId).order('sort_order'),
       supabase.from('product_units').select('*').eq('product_id', productId).order('sort_order'),
+      supabase.from('inventory_items').select('warehouse_id, quantity_on_hand').eq('product_id', productId),
     ]);
     setColors((colorRes.data || []) as ProductColor[]);
     setSizes((sizeRes.data || []) as ProductSize[]);
     setUnits((unitRes.data || []) as ProductUnit[]);
+
+    // Load current stock by warehouse
+    const stockMap: Record<string, string> = {};
+    warehouses.forEach(w => { stockMap[w.id] = '0'; });
+    (invRes.data || []).forEach(inv => {
+      stockMap[inv.warehouse_id] = String(inv.quantity_on_hand);
+    });
+    setStockByWarehouse(stockMap);
   }
 
   function addColor() {
@@ -651,6 +665,37 @@ function ProductModal({ categories, brands, warehouses, product, onClose, onSave
                 reference_type: 'product_creation',
                 reference_id: productId,
                 notes: 'Initial stock on product creation',
+              });
+            }
+          }
+        } else {
+          // Handle stock adjustments for existing products
+          for (const [warehouseId, newQtyStr] of Object.entries(stockByWarehouse)) {
+            const newQty = Number(newQtyStr);
+            const currentQty = product?.stock_by_warehouse?.find(s => s.warehouse_id === warehouseId)?.quantity || 0;
+            const diff = newQty - currentQty;
+
+            if (diff !== 0) {
+              // Update inventory
+              await supabase.from('inventory_items')
+                .upsert({
+                  tenant_id: '00000000-0000-0000-0000-000000000001',
+                  product_id: productId,
+                  warehouse_id: warehouseId,
+                  quantity_on_hand: newQty,
+                }, { onConflict: 'product_id,warehouse_id' });
+
+              // Record movement
+              await supabase.from('stock_movements').insert({
+                tenant_id: '00000000-0000-0000-0000-000000000001',
+                product_id: productId,
+                warehouse_id: warehouseId,
+                movement_type: 'adjustment',
+                quantity: Math.abs(diff),
+                unit_cost: Number(form.cost_price) || 0,
+                reference_type: 'stock_adjustment',
+                reference_id: productId,
+                notes: diff > 0 ? 'Stock increase adjustment' : 'Stock decrease adjustment',
               });
             }
           }
@@ -931,6 +976,46 @@ function ProductModal({ categories, brands, warehouses, product, onClose, onSave
             </div>
           )}
 
+          {isEdit && (
+            <div className="border-t border-border pt-4 mt-4">
+              <div className="flex items-center gap-2 mb-3">
+                <Warehouse className="w-4 h-4 text-muted-foreground" />
+                <label className="text-xs font-medium">Stock Adjustment by Warehouse</label>
+              </div>
+              <div className="space-y-2">
+                {warehouses.map(wh => {
+                  const currentQty = product?.stock_by_warehouse?.find(s => s.warehouse_id === wh.id)?.quantity || 0;
+                  const newQty = Number(stockByWarehouse[wh.id] || 0);
+                  const diff = newQty - currentQty;
+                  return (
+                    <div key={wh.id} className="flex items-center justify-between p-2 bg-muted/30 rounded-lg">
+                      <div className="flex-1">
+                        <span className="text-sm">{wh.name}</span>
+                        <span className="text-xs text-muted-foreground ml-2">(Current: {currentQty})</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          min="0"
+                          value={stockByWarehouse[wh.id] || '0'}
+                          onChange={e => setStockByWarehouse({ ...stockByWarehouse, [wh.id]: e.target.value })}
+                          className="w-24 border border-border rounded px-2 py-1 text-sm text-right focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                          placeholder="0"
+                        />
+                        {diff !== 0 && (
+                          <span className={`text-xs font-medium px-2 py-0.5 rounded ${diff > 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                            {diff > 0 ? `+${diff}` : diff}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="text-xs text-muted-foreground mt-2">Changes will be recorded as stock adjustments.</p>
+            </div>
+          )}
+
           <div>
             <label className="block text-xs font-medium mb-1">Description</label>
             <textarea value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} rows={2} className="w-full border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20" />
@@ -1103,13 +1188,6 @@ Tiles Premium,TIL-050,Flooring,CeramicCo,sqft,25,45,100,500,,,Carton,20,800`;
         continue;
       }
 
-      // Check if SKU exists
-      if (existingSkus.includes(sku)) {
-        skipped += groupRows.length;
-        errors.push(`Row ${firstRow._rowIndex}: SKU ${sku} already exists`);
-        continue;
-      }
-
       // Find category and brand
       const catName = firstRow['Category'] || firstRow['category'];
       const brandName = firstRow['Brand'] || firstRow['brand'];
@@ -1125,36 +1203,71 @@ Tiles Premium,TIL-050,Flooring,CeramicCo,sqft,25,45,100,500,,,Carton,20,800`;
       const enableColors = groupRows.some(r => r['Color'] || r['color']);
       const enableSizes = groupRows.some(r => r['Size'] || r['size']);
 
-      // Create product
-      const { data: productData, error: prodError } = await supabase.from('products').insert({
-        tenant_id: '00000000-0000-0000-0000-000000000001',
-        name,
-        sku,
-        unit: String(firstRow['Unit'] || firstRow['unit'] || 'pcs'),
-        base_unit: String(firstRow['Unit'] || firstRow['unit'] || 'pcs'),
-        cost_price: Number(firstRow['Cost Price'] || firstRow['cost_price'] || 0),
-        sale_price: Number(firstRow['Sale Price'] || firstRow['sale_price'] || 0),
-        min_stock_level: Number(firstRow['Min Stock Level'] || firstRow['min_stock_level'] || 0),
-        description: String(firstRow['Description'] || firstRow['description'] || ''),
-        category_id: category?.id || null,
-        brand_id: brand?.id || null,
-        enable_multi_unit: enableMultiUnit,
-        enable_colors: enableColors,
-        enable_sizes: enableSizes,
-        is_active: true,
-      }).select('id').single();
+      const skuExists = existingSkus.includes(sku);
+      let productId: string;
 
-      if (prodError || !productData) {
-        skipped += groupRows.length;
-        errors.push(`Row ${firstRow._rowIndex}: ${prodError?.message || 'Failed to create product'}`);
-        continue;
+      if (skuExists) {
+        // Update existing product
+        const { data: existingProduct, error: fetchError } = await supabase
+          .from('products')
+          .select('id')
+          .eq('sku', sku)
+          .single();
+
+        if (fetchError || !existingProduct) {
+          skipped += groupRows.length;
+          errors.push(`Row ${firstRow._rowIndex}: Failed to find existing product with SKU ${sku}`);
+          continue;
+        }
+
+        productId = existingProduct.id;
+
+        // Update product details (but preserve variant settings)
+        await supabase.from('products').update({
+          name,
+          unit: String(firstRow['Unit'] || firstRow['unit'] || 'pcs'),
+          cost_price: Number(firstRow['Cost Price'] || firstRow['cost_price'] || 0),
+          sale_price: Number(firstRow['Sale Price'] || firstRow['sale_price'] || 0),
+          min_stock_level: Number(firstRow['Min Stock Level'] || firstRow['min_stock_level'] || 0),
+          description: String(firstRow['Description'] || firstRow['description'] || ''),
+          category_id: category?.id || null,
+          brand_id: brand?.id || null,
+          updated_at: new Date().toISOString(),
+        }).eq('id', productId);
+      } else {
+        // Create new product
+        const { data: productData, error: prodError } = await supabase.from('products').insert({
+          tenant_id: '00000000-0000-0000-0000-000000000001',
+          name,
+          sku,
+          unit: String(firstRow['Unit'] || firstRow['unit'] || 'pcs'),
+          base_unit: String(firstRow['Unit'] || firstRow['unit'] || 'pcs'),
+          cost_price: Number(firstRow['Cost Price'] || firstRow['cost_price'] || 0),
+          sale_price: Number(firstRow['Sale Price'] || firstRow['sale_price'] || 0),
+          min_stock_level: Number(firstRow['Min Stock Level'] || firstRow['min_stock_level'] || 0),
+          description: String(firstRow['Description'] || firstRow['description'] || ''),
+          category_id: category?.id || null,
+          brand_id: brand?.id || null,
+          enable_multi_unit: enableMultiUnit,
+          enable_colors: enableColors,
+          enable_sizes: enableSizes,
+          is_active: true,
+        }).select('id').single();
+
+        if (prodError || !productData) {
+          skipped += groupRows.length;
+          errors.push(`Row ${firstRow._rowIndex}: ${prodError?.message || 'Failed to create product'}`);
+          continue;
+        }
+
+        productId = productData.id;
       }
 
-      const productId = productData.id;
-      let productsCreated = 1;
+      let productsCreated = skuExists ? 0 : 1;
+      let productsUpdated = skuExists ? 1 : 0;
 
-      // Add colors if enabled
-      if (enableColors) {
+      // Add colors if enabled (only for new products)
+      if (enableColors && !skuExists) {
         const uniqueColors = new Map<string, { name: string; hex: string }>();
         groupRows.forEach(r => {
           const colorName = String(r['Color'] || r['color'] || '').trim();
@@ -1181,8 +1294,8 @@ Tiles Premium,TIL-050,Flooring,CeramicCo,sqft,25,45,100,500,,,Carton,20,800`;
         }
       }
 
-      // Add sizes if enabled
-      if (enableSizes) {
+      // Add sizes if enabled (only for new products)
+      if (enableSizes && !skuExists) {
         const uniqueSizes = new Map<string, string>();
         groupRows.forEach(r => {
           const sizeName = String(r['Size'] || r['size'] || '').trim();
@@ -1202,8 +1315,8 @@ Tiles Premium,TIL-050,Flooring,CeramicCo,sqft,25,45,100,500,,,Carton,20,800`;
         }
       }
 
-      // Add multi-unit data
-      if (enableMultiUnit) {
+      // Add multi-unit data (only for new products)
+      if (enableMultiUnit && !skuExists) {
         // Base unit
         await supabase.from('product_units').insert({
           product_id: productId,
@@ -1235,29 +1348,59 @@ Tiles Premium,TIL-050,Flooring,CeramicCo,sqft,25,45,100,500,,,Carton,20,800`;
       for (const row of groupRows) {
         const currentStock = Number(row['Current Stock'] || row['current_stock'] || 0);
         if (currentStock > 0 && defaultWarehouse) {
-          const { error: invError } = await supabase.from('inventory_items').upsert({
-            tenant_id: '00000000-0000-0000-0000-000000000001',
-            product_id: productId,
-            warehouse_id: defaultWarehouse,
-            quantity_on_hand: currentStock,
-          }, { onConflict: 'product_id,warehouse_id' });
+          // Check current inventory for existing products
+          if (skuExists) {
+            const { data: existingInv } = await supabase
+              .from('inventory_items')
+              .select('quantity_on_hand')
+              .eq('product_id', productId)
+              .eq('warehouse_id', defaultWarehouse)
+              .single();
 
-          if (!invError) {
-            await supabase.from('stock_movements').insert({
+            const existingQty = existingInv?.quantity_on_hand || 0;
+            if (currentStock > existingQty) {
+              const addQty = currentStock - existingQty;
+              await supabase.from('inventory_items')
+                .update({ quantity_on_hand: currentStock })
+                .eq('product_id', productId)
+                .eq('warehouse_id', defaultWarehouse);
+
+              await supabase.from('stock_movements').insert({
+                tenant_id: '00000000-0000-0000-0000-000000000001',
+                product_id: productId,
+                warehouse_id: defaultWarehouse,
+                movement_type: 'adjustment',
+                quantity: addQty,
+                unit_cost: Number(firstRow['Cost Price'] || 0),
+                reference_type: 'import_update',
+                notes: 'Stock updated from import',
+              });
+            }
+          } else {
+            const { error: invError } = await supabase.from('inventory_items').upsert({
               tenant_id: '00000000-0000-0000-0000-000000000001',
               product_id: productId,
               warehouse_id: defaultWarehouse,
-              movement_type: 'opening',
-              quantity: currentStock,
-              unit_cost: Number(firstRow['Cost Price'] || 0),
-              reference_type: 'import',
-              notes: 'Initial stock from import',
-            });
+              quantity_on_hand: currentStock,
+            }, { onConflict: 'product_id,warehouse_id' });
+
+            if (!invError) {
+              await supabase.from('stock_movements').insert({
+                tenant_id: '00000000-0000-0000-0000-000000000001',
+                product_id: productId,
+                warehouse_id: defaultWarehouse,
+                movement_type: 'opening',
+                quantity: currentStock,
+                unit_cost: Number(firstRow['Cost Price'] || 0),
+                reference_type: 'import',
+                notes: 'Initial stock from import',
+              });
+            }
           }
         }
       }
 
-      success += productsCreated;
+      success += productsCreated + productsUpdated;
       existingSkus.push(sku);
     }
 
